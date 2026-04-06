@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision'
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
+import * as twgl from 'twgl.js'
 import './App.css'
 
 // Configuration
@@ -9,6 +10,8 @@ const VIDEO_HEIGHT = 720;
 const START_PINCH_THRESHOLD = 0.25; // Threshold to BEGIN a pinch
 const STOP_PINCH_THRESHOLD = 0.50;  // Threshold to BREAK a pinch (Hysteresis)
 const FADE_DURATION = 500;   // 500ms fade-out
+const GRID_SIZE = 20;        // 20x20 grid (800 triangles)
+const LERP_FACTOR = 0.12;    // Reduced from 0.25 for buttery smooth movement
 
 const COLORS = {
   // Primary lines
@@ -28,6 +31,105 @@ const COLORS = {
   hudText: '#00ff00',
 };
 
+// --- GS2.4 Shader Source (True Portal Mode) ---
+const VS_SOURCE = `#version 300 es
+precision highp float;
+in vec2 a_position;
+in vec2 a_texCoord;
+uniform vec2 u_resolution;
+out vec2 v_texCoord;
+out vec2 v_videoCoord;
+
+void main() {
+  v_texCoord = a_texCoord;
+  v_videoCoord = a_position / u_resolution;
+  vec2 zeroToOne = a_position / u_resolution;
+  vec2 zeroToTwo = zeroToOne * 2.0;
+  vec2 clipSpace = zeroToTwo - 1.0;
+  gl_Position = vec4(clipSpace * vec2(1, -1), 0, 1);
+}`;
+
+const FS_SOURCE = `#version 300 es
+precision highp float;
+out vec4 fragColor;
+uniform vec2 u_resolution;
+uniform float u_alpha;
+uniform sampler2D u_video;
+in vec2 v_texCoord;
+in vec2 v_videoCoord;
+
+#define CELL_W      6.0
+#define CELL_H      4.0
+
+float shapeResponse(float x) {
+    x = clamp(x, 0.0, 1.0);
+    return x * x;
+}
+
+void main() {
+    // True Portal Mode: Use screen-space v_videoCoord for sampling
+    vec2 fragCoord = v_videoCoord * u_resolution;
+    
+    vec2 cellSize = vec2(CELL_W, CELL_H);
+    vec2 cell = floor(fragCoord / cellSize);
+    vec2 cellOrigin = cell * cellSize;
+    vec2 localFrac = (fragCoord - cellOrigin) / cellSize;
+
+    int qx = int(localFrac.x * 3.0);
+    int qy = int(localFrac.y * 2.0);
+
+    vec2 cellCenter = cellOrigin + cellSize * 0.5;
+    vec3 cellCol = texture(u_video, cellCenter / u_resolution).rgb;
+
+    int ch0 = 0, ch1 = 1, ch2 = 2;
+    if (cellCol[1] > cellCol[0]) { ch0 = 1; ch1 = 0; }
+    if (cellCol[2] > cellCol[ch0]) { ch2 = ch0; ch0 = 2; }
+    else if (cellCol[2] > cellCol[ch1]) { ch2 = ch1; ch1 = 2; }
+
+    int role;
+    if (qx == 1)      role = ch1;  
+    else if (qy == 0) role = ch0;  
+    else               role = ch2;  
+
+    vec2 subSize = cellSize / vec2(3.0, 2.0);
+    vec2 subOrigin = cellOrigin + vec2(float(qx), float(qy)) * subSize;
+    vec2 sampleCoord = subOrigin + subSize * 0.5;
+    vec3 subCol = texture(u_video, sampleCoord / u_resolution).rgb;
+    float val = shapeResponse(subCol[role]);
+
+    vec2 inSub = fragCoord - subOrigin;
+    int idx = int(inSub.x) + int(inSub.y) * 2;
+
+    float threshold;
+    if      (idx == 0) threshold = 0.2;
+    else if (idx == 3) threshold = 0.4;
+    else if (idx == 2) threshold = 0.6;
+    else               threshold = 0.8;
+
+    float on = step(threshold, val);
+    fragColor = vec4(vec3(on), u_alpha);
+}
+`;
+
+const SHADER_SETTINGS = {
+  u_size: 8.0 // Pixel size
+};
+
+// Utilities
+
+
+// Bilinear interpolation for grid vertex generation
+const getGridPoint = (p1: Point2D, p2: Point2D, p3: Point2D, p4: Point2D, u: number, v: number): Point2D => {
+  const leftX = p1.x + (p4.x - p1.x) * v;
+  const leftY = p1.y + (p4.y - p1.y) * v;
+  const rightX = p2.x + (p3.x - p2.x) * v;
+  const rightY = p2.y + (p3.y - p2.y) * v;
+  return {
+    x: leftX + (rightX - leftX) * u,
+    y: leftY + (rightY - leftY) * u
+  };
+};
+
 interface Point2D {
   x: number;
   y: number;
@@ -43,16 +145,23 @@ interface RectPoints {
 function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const glCanvasRef = useRef<HTMLCanvasElement>(null);
   const landmarkerRef = useRef<HandLandmarker | null>(null);
+  const webglRef = useRef<{
+    gl: WebGL2RenderingContext;
+    programInfo: twgl.ProgramInfo;
+    bufferInfo: twgl.BufferInfo;
+    textures: { [key: string]: WebGLTexture };
+  } | null>(null);
 
   // Unified Interaction State
   const interactionRef = useRef({
     currentRect: null as RectPoints | null,
-    lockedRect: null as RectPoints | null,
     fadeStart: null as number | null,
     isFading: false,
-    isLockedEnabled: false,
-    isDrawing: false, // Latch for current session
+    isDrawing: false,
+    handLandmarks: [] as NormalizedLandmark[][], // PERSISTENT SMOOTHED LANDMARKS
+    pinchStates: [false, false] as [boolean, boolean] // Per-hand pinch hysteresis
   });
 
   const [isModelLoaded, setIsModelLoaded] = useState(false);
@@ -85,6 +194,64 @@ function App() {
     };
     initModel();
   }, []);
+
+  // Initialize WebGL (TWGL)
+  useEffect(() => {
+    const canvas = glCanvasRef.current;
+    if (!canvas) return;
+
+    const gl = canvas.getContext("webgl2", { alpha: true });
+    if (!gl) return;
+
+    try {
+      const programInfo = twgl.createProgramInfo(gl, [VS_SOURCE, FS_SOURCE]);
+      
+      // 1. Generate Static Grid UVs and Indices
+      const numVerts = (GRID_SIZE + 1) * (GRID_SIZE + 1);
+      const texCoords = new Float32Array(numVerts * 2);
+      const indices = new Uint16Array(GRID_SIZE * GRID_SIZE * 6);
+
+      for (let y = 0; y <= GRID_SIZE; y++) {
+        for (let x = 0; x <= GRID_SIZE; x++) {
+          const i = (y * (GRID_SIZE + 1) + x) * 2;
+          texCoords[i] = x / GRID_SIZE;
+          texCoords[i + 1] = 1.0 - (y / GRID_SIZE); // Flip Y for WebGL texture alignment
+        }
+      }
+
+      let idx = 0;
+      for (let y = 0; y < GRID_SIZE; y++) {
+        for (let x = 0; x < GRID_SIZE; x++) {
+          const p1 = y * (GRID_SIZE + 1) + x;
+          const p2 = p1 + 1;
+          const p3 = (y + 1) * (GRID_SIZE + 1) + x;
+          const p4 = p3 + 1;
+          indices[idx++] = p1; indices[idx++] = p2; indices[idx++] = p4;
+          indices[idx++] = p1; indices[idx++] = p4; indices[idx++] = p3;
+        }
+      }
+
+      // 2. Create Dynamic Position Buffer
+      const bufferInfo = twgl.createBufferInfoFromArrays(gl, {
+        a_position: { numComponents: 2, data: new Float32Array(numVerts * 2), drawType: gl.DYNAMIC_DRAW },
+        a_texCoord: { numComponents: 2, data: texCoords },
+        indices: { numComponents: 3, data: indices },
+      });
+
+      const textures = twgl.createTextures(gl, {
+        u_video: { src: [0, 0, 0, 255], format: gl.RGBA, min: gl.LINEAR, mag: gl.LINEAR, wrap: gl.CLAMP_TO_EDGE }
+      });
+
+      webglRef.current = { gl, programInfo, bufferInfo, textures };
+    } catch (err) {
+      console.error("WebGL Init Error:", err);
+    }
+
+    return () => {
+      // Cleanup
+      webglRef.current = null;
+    };
+  }, [isModelLoaded]); // Init after model/container are ready
 
   // Setup Webcam
   const setupWebcam = useCallback(async () => {
@@ -242,29 +409,56 @@ function App() {
           const currentTime = performance.now();
 
           let numPinching = 0;
-          let pinchActivePerHand: boolean[] = [false, false];
+          const sortedHands = results.landmarks 
+            ? [...results.landmarks].sort((a, b) => a[0].x - b[0].x).slice(0, 2) 
+            : [];
 
-          if (results.landmarks && results.landmarks.length > 0) {
-            setHandCount(results.landmarks.length);
-            results.landmarks.forEach((hand, idx) => {
-              if (idx > 1) return; // Only 2 hands
+          // 1. UPDATE SMOOTHED LANDMARKS (Full hand jitter reduction)
+          if (sortedHands.length > 0) {
+            if (interactionRef.current.handLandmarks.length !== sortedHands.length) {
+              // Rapid reset if hand count changes
+              interactionRef.current.handLandmarks = sortedHands;
+            } else {
+              // Apply LERP to every single joint
+              interactionRef.current.handLandmarks = interactionRef.current.handLandmarks.map((smoothHand, hIdx) => {
+                const targetHand = sortedHands[hIdx];
+                return smoothHand.map((prev, lmIdx) => {
+                  const target = targetHand[lmIdx];
+                  return {
+                    x: prev.x + (target.x - prev.x) * LERP_FACTOR,
+                    y: prev.y + (target.y - prev.y) * LERP_FACTOR,
+                    z: prev.z + (target.z - prev.z) * (LERP_FACTOR * 0.5) // Z is usually noisier
+                  } as NormalizedLandmark;
+                });
+              });
+            }
+          } else {
+            interactionRef.current.handLandmarks = [];
+          }
+
+          const activeHands = interactionRef.current.handLandmarks;
+
+          if (activeHands.length > 0) {
+            setHandCount(activeHands.length);
+            activeHands.forEach((hand, idx) => {
               const dist = getDistance(hand[4], hand[8]);
               
-              // Hysteresis logic per hand
-              const wasAlreadyDrawing = interactionRef.current.isDrawing;
-              const threshold = wasAlreadyDrawing ? STOP_PINCH_THRESHOLD : START_PINCH_THRESHOLD;
+              // Per-hand hysteresis
+              const wasPinching = interactionRef.current.pinchStates[idx];
+              const threshold = wasPinching ? STOP_PINCH_THRESHOLD : START_PINCH_THRESHOLD;
               const isPinching = dist < threshold;
               
-              pinchActivePerHand[idx] = isPinching;
+              interactionRef.current.pinchStates[idx] = isPinching;
               if (isPinching) numPinching++;
               
               drawSkeleton(ctx, hand, isPinching);
             });
           } else {
             setHandCount(0);
+            interactionRef.current.pinchStates = [false, false];
           }
 
-          const bothPinching = numPinching === 2;
+          const bothPinching = numPinching === 2 && sortedHands.length === 2;
           const wasDrawing = interactionRef.current.isDrawing;
 
           // Drawing State Machine
@@ -272,38 +466,32 @@ function App() {
             // ENTER_DRAWING
             interactionRef.current.isDrawing = true;
             interactionRef.current.isFading = false;
-          } else if (wasDrawing && (results.landmarks.length < 2 || !bothPinching)) {
+          } else if (wasDrawing && (activeHands.length < 2 || !bothPinching)) {
             // EXIT_DRAWING
             interactionRef.current.isDrawing = false;
             if (interactionRef.current.currentRect) {
-              if (interactionRef.current.isLockedEnabled) {
-                interactionRef.current.lockedRect = interactionRef.current.currentRect;
-                interactionRef.current.currentRect = null;
-              } else {
-                interactionRef.current.fadeStart = currentTime;
-                interactionRef.current.isFading = true;
-              }
+              interactionRef.current.fadeStart = currentTime;
+              interactionRef.current.isFading = true;
             }
           }
 
-          // Update currentRect if drawing
-          if (interactionRef.current.isDrawing && results.landmarks.length === 2) {
-            const h0 = results.landmarks[0];
-            const h1 = results.landmarks[1];
-            interactionRef.current.currentRect = {
-              p1: { x: h0[4].x * VIDEO_WIDTH, y: h0[4].y * VIDEO_HEIGHT },
-              p2: { x: h0[8].x * VIDEO_WIDTH, y: h0[8].y * VIDEO_HEIGHT },
-              p3: { x: h1[8].x * VIDEO_WIDTH, y: h1[8].y * VIDEO_HEIGHT },
-              p4: { x: h1[4].x * VIDEO_WIDTH, y: h1[4].y * VIDEO_HEIGHT }
+          // Update currentRect with LERP smoothing
+          if (interactionRef.current.isDrawing && activeHands.length === 2) {
+            const hL = activeHands[0];
+            const hR = activeHands[1];
+            
+            // Note: landmarks are already smoothed via handLandmarks LERP
+            const targetPoints = {
+              p1: { x: hL[4].x * VIDEO_WIDTH, y: hL[4].y * VIDEO_HEIGHT },
+              p2: { x: hR[4].x * VIDEO_WIDTH, y: hR[4].y * VIDEO_HEIGHT },
+              p3: { x: hR[8].x * VIDEO_WIDTH, y: hR[8].y * VIDEO_HEIGHT },
+              p4: { x: hL[8].x * VIDEO_WIDTH, y: hL[8].y * VIDEO_HEIGHT }
             };
+
+            interactionRef.current.currentRect = targetPoints;
           }
 
-          // RENDER PRIORITY: Locked > Live > Faded
-          
-          // 1. Locked (Green)
-          if (interactionRef.current.lockedRect) {
-            drawQuad(ctx, interactionRef.current.lockedRect, COLORS.rectSaved);
-          }
+          // RENDER PRIORITY: Live > Faded
 
           // 2. Fading (Transition from Yellow to Green-Alpha?)
           if (interactionRef.current.isFading && interactionRef.current.currentRect && interactionRef.current.fadeStart) {
@@ -320,6 +508,61 @@ function App() {
           // 3. Live (Yellow)
           if (interactionRef.current.isDrawing && interactionRef.current.currentRect) {
             drawQuad(ctx, interactionRef.current.currentRect, COLORS.rectActive);
+          }
+        }
+
+        // --- WebGL ASCII Rendering Layer ---
+        if (webglRef.current) {
+          const { gl, programInfo, bufferInfo, textures } = webglRef.current;
+          let targetRect = null;
+          let currentAlpha = 0;
+
+          if (interactionRef.current.currentRect) {
+            targetRect = interactionRef.current.currentRect;
+            if (interactionRef.current.isFading && interactionRef.current.fadeStart) {
+              const elapsed = performance.now() - interactionRef.current.fadeStart;
+              currentAlpha = Math.max(0, 1 - (elapsed / FADE_DURATION));
+            } else if (interactionRef.current.isDrawing) {
+              currentAlpha = 1.0;
+            }
+          }
+
+          if (targetRect && currentAlpha > 0) {
+            const { p1, p2, p3, p4 } = targetRect;
+            
+            // Generate Mesh Subdivision via Bilinear Interpolation
+            const numVerts = (GRID_SIZE + 1) * (GRID_SIZE + 1);
+            const positions = new Float32Array(numVerts * 2);
+            
+            for (let y = 0; y <= GRID_SIZE; y++) {
+              const v = y / GRID_SIZE;
+              for (let x = 0; x <= GRID_SIZE; x++) {
+                const u = x / GRID_SIZE;
+                const point = getGridPoint(p1, p2, p3, p4, u, v);
+                const i = (y * (GRID_SIZE + 1) + x) * 2;
+                positions[i] = point.x;
+                positions[i + 1] = point.y;
+              }
+            }
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, bufferInfo.attribs!.a_position.buffer);
+            gl.bufferSubData(gl.ARRAY_BUFFER, 0, positions);
+
+            gl.viewport(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
+            twgl.setTextureFromElement(gl, textures.u_video, video);
+            gl.useProgram(programInfo.program);
+            twgl.setBuffersAndAttributes(gl, programInfo, bufferInfo);
+            twgl.setUniforms(programInfo, {
+              u_time: performance.now() * 0.001,
+              u_resolution: [VIDEO_WIDTH, VIDEO_HEIGHT],
+              u_alpha: currentAlpha,
+              u_video: textures.u_video,
+              ...SHADER_SETTINGS,
+            });
+            twgl.drawBufferInfo(gl, bufferInfo);
+          } else {
+            gl.clearColor(0, 0, 0, 0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
           }
         }
 
@@ -354,61 +597,16 @@ function App() {
           <code style={{ color: '#ff0000', marginTop: '5px' }}>[WEB_CAM_ERROR: {webcamError}]</code>
         )}
 
-        <div style={{ 
-          margin: '15px 0', 
-          padding: '10px', 
-          border: '1px solid rgba(0, 255, 0, 0.3)', 
-          background: 'rgba(0, 255, 0, 0.05)',
-          borderRadius: '4px'
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
-            <input 
-              type="checkbox" 
-              id="lock-rect" 
-              onChange={(e) => interactionRef.current.isLockedEnabled = e.target.checked}
-              style={{ 
-                width: '18px', 
-                height: '18px', 
-                cursor: 'pointer',
-                accentColor: '#00ff00'
-              }}
-            />
-            <label htmlFor="lock-rect" style={{ 
-              cursor: 'pointer', 
-              fontSize: '0.9rem', 
-              color: '#00ff00',
-              textShadow: '0 0 5px #00ff00'
-            }}>
-              LOCK_TARGET_RECT
-            </label>
-          </div>
-          
-          <button 
-            className="retry-btn" 
-            onClick={() => {
-              interactionRef.current.lockedRect = null;
-              interactionRef.current.currentRect = null;
-            }}
-            style={{ 
-              width: '100%', 
-              padding: '8px',
-              fontSize: '0.8rem',
-              letterSpacing: '1px'
-            }}
-          >
-            [CLEAR_MEMORY_STALL]
-          </button>
-        </div>
-
         <code style={{ fontSize: '0.7rem', opacity: 0.6, lineHeight: '1.4' }}>
           {">"} PINCH_DUAL: CREATE_QUAD<br/>
           {">"} RELEASE: AUTO_FADE_500MS<br/>
-          {">"} LOCK_ENABLED: PERSIST_BUFFER
+          {">"} SYSTEM: REALTIME_MODE
         </code>
       </div>
 
       <div className="media-container">
         <video ref={videoRef} className="hd-feed" playsInline muted autoPlay />
+        <canvas ref={glCanvasRef} className="webgl-layer" width={VIDEO_WIDTH} height={VIDEO_HEIGHT} />
         <canvas ref={canvasRef} className="hd-overlay" width={VIDEO_WIDTH} height={VIDEO_HEIGHT} />
       </div>
     </div>

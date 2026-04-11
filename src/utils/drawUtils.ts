@@ -33,7 +33,11 @@ export function drawQuad(ctx: CanvasRenderingContext2D, rect: RectPoints, color:
   ctx.restore();
 }
 
-export function drawSkeleton(ctx: CanvasRenderingContext2D, hand: NormalizedLandmark[], isPinching: boolean) {
+export function drawSkeleton(
+    ctx: CanvasRenderingContext2D, 
+    hand: NormalizedLandmark[], 
+    isDrawing: boolean = false
+) {
     const connections = [
         [0, 1], [1, 2], [2, 3], [3, 4],
         [0, 5], [5, 6], [6, 7], [7, 8],
@@ -62,10 +66,11 @@ export function drawSkeleton(ctx: CanvasRenderingContext2D, hand: NormalizedLand
         gradient.addColorStop(1, COLORS.hand_bone_end);
 
         // Glow
-        ctx.strokeStyle = 'rgba(0, 243, 255, 0.2)';
-        ctx.lineWidth = 6;
-        ctx.shadowBlur = 20;
-        ctx.shadowColor = COLORS.hand_bone_mid;
+        const isHighlight = isDrawing;
+        ctx.strokeStyle = isHighlight ? 'rgba(0, 255, 0, 0.4)' : 'rgba(0, 243, 255, 0.2)';
+        ctx.lineWidth = isHighlight ? 8 : 6;
+        ctx.shadowBlur = isHighlight ? 30 : 20;
+        ctx.shadowColor = isHighlight ? '#00ff00' : COLORS.hand_bone_mid;
         ctx.lineCap = 'round';
         ctx.beginPath();
         ctx.moveTo(x1, y1);
@@ -87,9 +92,17 @@ export function drawSkeleton(ctx: CanvasRenderingContext2D, hand: NormalizedLand
         const y = lm.y * VIDEO_CONFIG.HEIGHT;
 
         let color = COLORS.middle_joints;
+
         if (idx === 0) color = COLORS.wrist;
-        if (idx === 4 || idx === 8) color = isPinching ? COLORS.fingertips : COLORS.middle_joints;
+        if (idx === 4 || idx === 8) {
+          color = isDrawing ? (COLORS.rectSaved || '#00ff00') : COLORS.fingertips;
+        }
         if ([12, 16, 20].includes(idx)) color = COLORS.accent_2;
+        
+        if (isDrawing) {
+            ctx.shadowBlur = 40;
+            ctx.shadowColor = '#00ff00';
+        }
 
         ctx.fillStyle = color;
         ctx.globalAlpha = 0.2;

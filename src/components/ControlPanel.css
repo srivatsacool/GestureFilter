@@ -1,0 +1,136 @@
+/* ControlPanel.css */
+.control-panel {
+  position: absolute;
+  top: 30px;
+  left: 30px;
+  width: 280px;
+  background: rgba(10, 10, 12, 0.7);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(0, 255, 255, 0.15);
+  border-radius: 12px;
+  padding: 24px;
+  z-index: 1000;
+  color: #e0faff;
+  font-family: 'Outfit', 'Inter', sans-serif;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.control-panel:hover {
+  transform: translateY(-5px);
+  border-color: rgba(0, 255, 255, 0.3);
+}
+
+.cp-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(0, 255, 255, 0.1);
+}
+
+.cp-title {
+  font-size: 0.85rem;
+  letter-spacing: 2px;
+  font-weight: 800;
+  background: linear-gradient(90deg, #00ffff, #0088ff);
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.cp-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+}
+
+.cp-status-dot.active {
+  background: #00ffff;
+  animation: glow 1.5s infinite alternate;
+}
+
+.cp-status-dot.loading {
+  background: #ffaa00;
+  animation: pulse 1s infinite alternate;
+}
+
+.cp-section {
+  margin-bottom: 20px;
+}
+
+.cp-label {
+  font-size: 0.65rem;
+  color: rgba(0, 255, 255, 0.4);
+  letter-spacing: 1px;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+}
+
+.cp-stat-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font-size: 0.8rem;
+}
+
+.cp-value {
+  color: #fff;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.cp-value.highlight {
+  color: #00ffff;
+  text-shadow: 0 0 10px rgba(0, 255, 255, 0.3);
+}
+
+.cp-button-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.cp-btn {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.7);
+  padding: 8px 10px;
+  font-size: 0.7rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-weight: 600;
+}
+
+.cp-btn:hover {
+  background: rgba(0, 255, 255, 0.05);
+  border-color: rgba(0, 255, 255, 0.2);
+  color: #00ffff;
+}
+
+.cp-btn.active {
+  background: rgba(0, 255, 255, 0.15);
+  border-color: #00ffff;
+  color: #fff;
+  box-shadow: 0 0 15px rgba(0, 255, 255, 0.2);
+}
+
+.cp-footer {
+  font-size: 0.6rem;
+  color: rgba(255, 255, 255, 0.3);
+  text-align: center;
+  margin-top: 10px;
+}
+
+@keyframes glow {
+  from { opacity: 0.4; transform: scale(0.8); }
+  to { opacity: 1; transform: scale(1.1); }
+}
+
+@keyframes pulse {
+  from { opacity: 0.3; }
+  to { opacity: 0.8; }
+}

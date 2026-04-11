@@ -1,7 +1,12 @@
 {
   "name": "gesture-filter",
-  "private": true,
   "version": "2.0.0",
+  "description": "High-performance WebGL gesture-based camera filters using MediaPipe and Anti-Gravity UI.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/srivatsacool/GestureFilter.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

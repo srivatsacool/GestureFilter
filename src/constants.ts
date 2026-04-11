@@ -5,10 +5,12 @@ export const VIDEO_CONFIG = {
 };
 
 export const GESTURE_CONFIG = {
-  START_PINCH_THRESHOLD: 0.25, // Threshold to BEGIN a pinch
-  STOP_PINCH_THRESHOLD: 0.50,  // Threshold to BREAK a pinch (Hysteresis)
-  FADE_DURATION: 300,          // 300ms fade-out (was 500)
-  LERP_FACTOR: 0.28,           // Smoother but faster tracking (was 0.12)
+  PINCH_START: 0.045,          // Threshold to BEGIN a pinch
+  PINCH_END: 0.065,            // Threshold to BREAK a pinch (Hysteresis)
+  TRIGGER_HOLD_TIME: 120,      // ms to hold before activation
+  RELEASE_HOLD_TIME: 180,      // ms to hold before deactivation
+  FADE_DURATION: 300,          // ms for visual fade-out
+  LERP_FACTOR: 0.28,           // Smoothing factor
 };
 
 export const COLORS = {

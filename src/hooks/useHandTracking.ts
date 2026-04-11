@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
-import type { NormalizedLandmark } from '@mediapipe/tasks-vision';
-import { VIDEO_CONFIG, GESTURE_CONFIG } from '../constants';
-import type { InteractionState, RectPoints } from '../types';
+import { VIDEO_CONFIG, INFERENCE_CONFIG } from '../core/constants';
+import type { TrackingData } from '../core/types';
 
 export function useHandTracking() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -10,18 +9,18 @@ export function useHandTracking() {
   const [isModelLoaded, setIsModelLoaded] = useState(false);
   const [handCount, setHandCount] = useState(0);
 
-  // High-frequency mutable state (60fps loop uses these directly)
-  const interactionStateRef = useRef<InteractionState>({
-    currentRect: null,
-    fadeAlpha: 0,
+  // Downscale for performance (360p)
+  const scaledCanvasRef = useRef<OffscreenCanvas | null>(null);
+  const scaledCtxRef = useRef<OffscreenCanvasRenderingContext2D | null>(null);
+
+  // Latest results for the 60 FPS rendering loop
+  const latestResultsRef = useRef<TrackingData>({
+    hands: [],
+    timestamp: 0,
+    fps: 0
   });
 
-  const smoothLandmarksRef = useRef<NormalizedLandmark[][]>([]);
-  const pinchStatesRef = useRef<[boolean, boolean]>([false, false]);
-  const isDrawingRef = useRef(false);
-  const fadeStartRef = useRef<number | null>(null);
-
-  // Initialize MediaPipe
+  // Initialize MediaPipe on Main Thread
   useEffect(() => {
     const initModel = async () => {
       const vision = await FilesetResolver.forVisionTasks(
@@ -34,16 +33,28 @@ export function useHandTracking() {
         },
         runningMode: "VIDEO",
         numHands: 2,
-        minHandDetectionConfidence: 0.6,
-        minHandPresenceConfidence: 0.6,
-        minTrackingConfidence: 0.6
+        minHandDetectionConfidence: 0.4,
+        minHandPresenceConfidence: 0.4,
+        minTrackingConfidence: 0.4
       });
+
+      // Init offscreen canvas for downscaling
+      scaledCanvasRef.current = new OffscreenCanvas(
+        INFERENCE_CONFIG.INPUT_WIDTH, 
+        INFERENCE_CONFIG.INPUT_HEIGHT
+      );
+      scaledCtxRef.current = scaledCanvasRef.current.getContext('2d');
+
       setIsModelLoaded(true);
     };
     initModel();
+
+    return () => {
+      landmarkerRef.current?.close();
+    };
   }, []);
 
-  // Singleton Webcam Feed Initialization
+  // Setup Webcam (Standard)
   const setupWebcam = useCallback(async () => {
     if (!navigator.mediaDevices?.getUserMedia) return;
     try {
@@ -51,7 +62,7 @@ export function useHandTracking() {
         video: { 
           width: VIDEO_CONFIG.WIDTH, 
           height: VIDEO_CONFIG.HEIGHT, 
-          frameRate: VIDEO_CONFIG.FPS 
+          frameRate: 30 
         }
       });
       if (videoRef.current) {
@@ -64,98 +75,43 @@ export function useHandTracking() {
 
   useEffect(() => { setupWebcam(); }, [setupWebcam]);
 
-  // Core Processing Loop Logic
-  const processFrame = useCallback(() => {
+  // Optimized Inference: Throttled to 30 FPS and 360p
+  const lastInferenceTimeRef = useRef(0);
+  const processFrameOptimized = useCallback(() => {
     const video = videoRef.current;
     const landmarker = landmarkerRef.current;
+    const scaledCtx = scaledCtxRef.current;
+    
+    if (!video || !landmarker || video.readyState !== 4 || !isModelLoaded || !scaledCtx) return;
 
-    if (!video || !landmarker || video.readyState !== 4) return;
+    const now = performance.now();
+    // Throttle to 30 FPS
+    if (now - lastInferenceTimeRef.current < (1000 / INFERENCE_CONFIG.UPDATE_FPS)) return;
+    lastInferenceTimeRef.current = now;
 
-    const results = landmarker.detectForVideo(video, performance.now());
-    const currentTime = performance.now();
-
-    const sortedHands = results.landmarks 
-      ? [...results.landmarks].sort((a, b) => a[0].x - b[0].x).slice(0, 2) 
-      : [];
-
-    setHandCount(sortedHands.length);
-
-    // 1. UPDATE SMOOTHED LANDMARKS
-    if (sortedHands.length > 0) {
-      if (smoothLandmarksRef.current.length !== sortedHands.length) {
-        smoothLandmarksRef.current = sortedHands;
-      } else {
-        smoothLandmarksRef.current = smoothLandmarksRef.current.map((smoothHand, hIdx) => {
-          const targetHand = sortedHands[hIdx];
-          return smoothHand.map((prev, lmIdx) => {
-            const target = targetHand[lmIdx];
-            return {
-              x: prev.x + (target.x - prev.x) * GESTURE_CONFIG.LERP_FACTOR,
-              y: prev.y + (target.y - prev.y) * GESTURE_CONFIG.LERP_FACTOR,
-              z: prev.z + (target.z - prev.z) * (GESTURE_CONFIG.LERP_FACTOR * 0.5)
-            } as NormalizedLandmark;
-          });
-        });
-      }
-    } else {
-      smoothLandmarksRef.current = [];
-    }
-
-    // 2. PINCH DETECTION & RECT LOGIC
-    let numPinching = 0;
-    smoothLandmarksRef.current.forEach((hand, idx) => {
-      const dist = Math.sqrt(Math.pow(hand[4].x - hand[8].x, 2) + Math.pow(hand[4].y - hand[8].y, 2));
-      const wasPinching = pinchStatesRef.current[idx];
-      const threshold = wasPinching ? GESTURE_CONFIG.STOP_PINCH_THRESHOLD : GESTURE_CONFIG.START_PINCH_THRESHOLD;
-      const isPinching = dist < threshold;
-      pinchStatesRef.current[idx] = isPinching;
-      if (isPinching) numPinching++;
-    });
-
-    const bothPinching = numPinching === 2 && smoothLandmarksRef.current.length === 2;
-    const wasDrawing = isDrawingRef.current;
-
-    // State Machine
-    if (!wasDrawing && bothPinching) {
-      isDrawingRef.current = true;
-      fadeStartRef.current = null;
-    } else if (wasDrawing && !bothPinching) {
-      isDrawingRef.current = false;
-      fadeStartRef.current = currentTime;
-    }
-
-    // Update Persistent Rect State (Deterministic Ordering)
-    if (isDrawingRef.current && smoothLandmarksRef.current.length === 2) {
-      const hL = smoothLandmarksRef.current[0];
-      const hR = smoothLandmarksRef.current[1];
-      
-      const nextRect: RectPoints = {
-        p1: { x: hL[4].x * VIDEO_CONFIG.WIDTH, y: hL[4].y * VIDEO_CONFIG.HEIGHT }, // L Thumb
-        p2: { x: hR[4].x * VIDEO_CONFIG.WIDTH, y: hR[4].y * VIDEO_CONFIG.HEIGHT }, // R Thumb
-        p3: { x: hR[8].x * VIDEO_CONFIG.WIDTH, y: hR[8].y * VIDEO_CONFIG.HEIGHT }, // R Index
-        p4: { x: hL[8].x * VIDEO_CONFIG.WIDTH, y: hL[8].y * VIDEO_CONFIG.HEIGHT }  // L Index
-      };
-
-      interactionStateRef.current.currentRect = nextRect;
-      interactionStateRef.current.fadeAlpha = 1.0;
-    } else if (fadeStartRef.current) {
-      const elapsed = currentTime - fadeStartRef.current;
-      const alpha = Math.max(0, 1 - (elapsed / GESTURE_CONFIG.FADE_DURATION));
-      interactionStateRef.current.fadeAlpha = alpha;
-      if (alpha === 0) {
-        interactionStateRef.current.currentRect = null;
-        fadeStartRef.current = null;
-      }
-    }
-  }, []);
+    // 1. Downscale to 360p
+    scaledCtx.drawImage(video, 0, 0, INFERENCE_CONFIG.INPUT_WIDTH, INFERENCE_CONFIG.INPUT_HEIGHT);
+    
+    // 2. Inference
+    const results = landmarker.detectForVideo(scaledCanvasRef.current!, now);
+    
+    // 3. Update Ref for main loop
+    latestResultsRef.current = {
+      hands: (results.landmarks || []).map((lm, i) => ({
+        landmarks: lm,
+        handedness: results.handedness?.[i]?.[0]?.categoryName as 'Left' | 'Right'
+      })),
+      timestamp: now,
+      fps: INFERENCE_CONFIG.UPDATE_FPS
+    };
+    setHandCount(results.landmarks?.length || 0);
+  }, [isModelLoaded]);
 
   return {
     videoRef,
     isModelLoaded,
     handCount,
-    processFrame, 
-    interactionStateRef,
-    smoothLandmarksRef,
-    pinchStatesRef,
+    latestResultsRef,
+    processFrameOptimized
   };
 }

@@ -1,70 +1,70 @@
-# GestureFilter v2 - Anti-Gravity UI
+# GestureFilter v2 — Anti-Gravity UI
 
-![Gesture Filter Hero](https://via.placeholder.com/1200x500.png?text=Gesture+Filter+-+Anti-Gravity+UI)
+<p align="center">
+  <img src="assets/hero.png" alt="GestureFilter Hero Banner" width="100%" />
+</p>
 
-**GestureFilter** is a high-performance, real-time webcam filter engine built in React and WebGL. Powered by Google's MediaPipe, it features the modular Anti-Gravity filter architecture and an advanced gesture-based number detection mode.
+## Overview
 
-Originally conceived to push the boundaries of browser-based AR processing, the engine guarantees a stable 60 FPS while keeping the UI minimal and distraction-free.
-
----
-
-## ⚡ Features
-
-- **Blazing Fast WebGL Shaders**: Offloads pixel processing to the GPU using lightweight quads overlaid on the video feed. Included filters:
-  - `Dither` - Retro 1-bit style dithering.
-  - `Glitch` - High-tech CRT/signal glitch effects.
-  - `ASCII` - Real-time ASCII art rendering.
-  - `Drunk` - Multi-pass distortion and color bleeding.
-- **MediaPipe Hand Tracking Engine**: Uses Google's MediaPipe Vision tasks over a Web Worker to keep the main thread completely untethered.
-- **Anti-Gravity UI**: A meticulously crafted zero-waste interface that looks beautiful but gets out of your way. Toggle it with a discreet overlay button.
-- **Number Detection Mode (1-10)**: Uses custom heuristics based on joint tip mapping to detect numbers 1-10 through complex one- and two-hand gestures.
-- **Hand Stabilizer Array**: Custom ghosting and frame persistence algorithms so your filters don't glitch when tracking wobbles.
+**GestureFilter** is a high-performance, **real-time webcam filter engine** built in React and WebGL. Powered by Google's **MediaPipe**, it features GPU-accelerated shader filters (Dither, Glitch, ASCII, Drunk), gesture-based number detection (1-10), and the modular Anti-Gravity UI architecture — all running at a stable **60 FPS** in the browser.
 
 ---
 
-## 🚀 Quick Setup
+## Key Features
 
-### Prerequisites
-- Node.js >= 18
-- npm or pnpm or yarn
+- **WebGL Shader Filters** — Dither, Glitch, ASCII, and Drunk effects at 60 FPS
+- **MediaPipe Hand Tracking** — Runs in a Web Worker for zero main-thread blocking
+- **Number Detection (1-10)** — Custom joint-tip heuristics for one/two-hand gestures
+- **Hand Stabilizer** — Frame persistence algorithms to prevent tracking jitter
+- **Anti-Gravity UI** — Minimal, zero-waste interface with toggle overlay
+- **Edge-ready** — Optimized for Cloudflare Pages / Vercel deployment
 
-### Installation
+---
+
+## Technology Stack
+
+| Technology | Purpose |
+|---|---|
+| React | UI framework |
+| WebGL | GPU shader rendering |
+| MediaPipe Vision | Hand tracking inference |
+| Vite | Build tool |
+| TypeScript | Type-safe codebase |
+| Web Workers | Off-thread ML inference |
+| Cloudflare Pages | Edge deployment |
+
+---
+
+## Architecture
+
+```text
+Webcam Feed
+    ↓
+Web Worker → MediaPipe Hand Detection
+    ↓
+Gesture Recognition + Hand Stabilizer
+    ↓
+WebGL Shader Pipeline (FilterBase)
+    ↓
+Real-time Canvas Output @ 60 FPS
+```
+
+---
+
+## Installation & Setup
+
 ```bash
 git clone https://github.com/srivatsacool/GestureFilter.git
 cd GestureFilter
 npm install
-```
-
-### Development
-```bash
 npm run dev
+# Open http://localhost:5173
 ```
-Preview locally at [http://localhost:5173](http://localhost:5173).
 
 ---
 
-## ☁️ Deployment (Cloudflare Pages)
+## Author
 
-This project is optimized out of the box for deployment on edge providers like **Cloudflare Pages** and Vercel.
-
-1. Connect your GitHub repository to Cloudflare Pages.
-2. Select **Vite** or **React** framework presets.
-3. Build command: `npm run build`
-4. Build output directory: `dist`
-5. Deploy!
-
-No additional configuration needed. The `vite.config.ts` ensures everything routes cleanly.
+**Srivatsa Gorti**
 
 ---
-
-## 🧠 Core Architecture overview
-
-- **`src/filters/*`**: Filter logic extending the `FilterBase` abstract class. Handles WebGL shader compilation, frame buffer updates, and uniforms.
-- **`src/modes/*`**: Modes dictate *how* the application reacts to the user's hands. Examples include `NormalMode` and `NumberDetectionMode`. 
-- **`src/core/utils/HandStabilizer.ts`**: The persistence layer tracking hands across frames, preventing jitter.
-- **`src/hooks/useHandTracking.ts`**: Core inference hook wrapping MediaPipe instance in an optimized RequestAnimationFrame loop.
-
----
-
-## 📄 License
-This project is open-sourced under the **[MIT License](LICENSE)**.
